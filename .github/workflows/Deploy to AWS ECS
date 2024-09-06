@@ -1,0 +1,63 @@
+name: Deploy to AWS ECS
+
+on:
+  push:
+    branches:
+      - main  # Deploy on push to the main branch
+
+env:
+  AWS_REGION: us-east-1  # Set your AWS region
+  ECR_REPOSITORY: your-ecr-repo  # Replace with your ECR repository name
+  ECS_CLUSTER: your-ecs-cluster-name  # Replace with your ECS cluster name
+  ECS_SERVICE: your-ecs-service-name  # Replace with your ECS service name
+  CONTAINER_NAME: your-container-name  # Replace with your container name
+
+jobs:
+  deploy:
+    name: Build, Push to ECR, and Deploy to ECS
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout the repository
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # Log in to Amazon ECR
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      # Build the Docker image
+      - name: Build Docker image
+        run: |
+          IMAGE_TAG=$(date +%s)
+          docker build -t ${{ env.ECR_REPOSITORY }}:${IMAGE_TAG} .
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+
+      # Push the Docker image to Amazon ECR
+      - name: Push to Amazon ECR
+        run: |
+          docker tag ${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+      # Update ECS service with the new image
+      - name: Deploy to ECS
+        run: |
+          ECS_TASK_DEF=$(aws ecs describe-task-definition --task-definition ${{ env.ECS_SERVICE }} --region ${{ env.AWS_REGION }} --query taskDefinition)
+          NEW_IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
+          
+          NEW_TASK_DEF=$(echo $ECS_TASK_DEF | jq --arg IMG "$NEW_IMAGE" '.containerDefinitions[0].image = $IMG')
+          echo $NEW_TASK_DEF | jq . > new-task-def.json
+          
+          # Register the updated task definition
+          aws ecs register-task-definition \
+            --family ${{ env.ECS_SERVICE }} \
+            --cli-input-json file://new-task-def.json \
+            --region ${{ env.AWS_REGION }}
+
+          # Update the ECS service with the new task definition
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
